@@ -4,20 +4,27 @@ const ffmpeg = require('fluent-ffmpeg');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
+const http = require('http');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware con configurazione CORS specifica
+// =======================
+// Middleware
+// =======================
 app.use(cors({
-  origin: '*', // Permetti tutte le origini (puoi limitare a lovable.dev in produzione)
+  origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Configurazione storage per upload
+// =======================
+// Multer (kept for legacy endpoints)
+// =======================
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const uploadDir = './uploads';
@@ -33,19 +40,16 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage,
-  limits: {
-    fileSize: 100 * 1024 * 1024 // 100MB max
-  }
+  limits: { fileSize: 100 * 1024 * 1024 }
 });
 
-// Helper middleware per accettare sia 'video' che 'file' come nome campo
+// Legacy helper (file upload support)
 const videoUpload = (req, res, next) => {
   const uploader = upload.any();
   uploader(req, res, (err) => {
     if (err) {
       return res.status(400).json({ error: err.message });
     }
-    // Trova il primo file caricato
     if (req.files && req.files.length > 0) {
       req.file = req.files[0];
     }
@@ -53,7 +57,33 @@ const videoUpload = (req, res, next) => {
   });
 };
 
-// Endpoint per verificare lo stato del servizio
+// =======================
+// Utils
+// =======================
+function downloadFromUrl(sourceUrl, destPath) {
+  return new Promise((resolve, reject) => {
+    const client = sourceUrl.startsWith('https') ? https : http;
+    const file = fs.createWriteStream(destPath);
+
+    client.get(sourceUrl, (response) => {
+      if (response.statusCode !== 200) {
+        reject(new Error(`Failed to download: ${response.statusCode}`));
+        return;
+      }
+      response.pipe(file);
+      file.on('finish', () => {
+        file.close(resolve);
+      });
+    }).on('error', (err) => {
+      fs.unlink(destPath, () => {});
+      reject(err);
+    });
+  });
+}
+
+// =======================
+// Health
+// =======================
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
@@ -62,31 +92,22 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Endpoint per ottenere informazioni su un video
+// =======================
+// INFO — accepts ONLY file (legacy)
+// =======================
 app.post('/video/info', videoUpload, async (req, res) => {
-  console.log('Received video info request');
   try {
     if (!req.file) {
-      console.error('No video file provided');
       return res.status(400).json({ error: 'No video file provided' });
     }
 
-    console.log('Processing file:', req.file.originalname);
-    
     ffmpeg.ffprobe(req.file.path, (err, metadata) => {
-      // Pulisci il file temporaneo
-      try {
-        fs.unlinkSync(req.file.path);
-      } catch (e) {
-        console.error('Error deleting temp file:', e);
-      }
+      try { fs.unlinkSync(req.file.path); } catch {}
 
       if (err) {
-        console.error('FFprobe error:', err);
         return res.status(500).json({ error: err.message });
       }
 
-      console.log('Video info retrieved successfully');
       res.json({
         duration: metadata.format.duration,
         size: metadata.format.size,
@@ -101,55 +122,39 @@ app.post('/video/info', videoUpload, async (req, res) => {
       });
     });
   } catch (error) {
-    console.error('Unexpected error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Endpoint per convertire video DA URL
-app.post('/video/convert-from-url', express.json(), async (req, res) => {
+// =======================
+// 🔥 MAIN ENDPOINT FOR LOVABLE
+// Accepts JSON or multipart with videoUrl
+// =======================
+app.post('/video/convert-from-url', async (req, res) => {
   console.log('Received convert-from-url request');
-  const { videoUrl, url, format = 'mp4', quality = 'medium', startTime, duration, outputFormat } = req.body;
-  
+
+  const {
+    videoUrl,
+    url,
+    format = 'mp4',
+    quality = 'medium',
+    startTime,
+    duration
+  } = req.body || {};
+
   const sourceUrl = videoUrl || url;
-  
+
   if (!sourceUrl) {
-    console.error('No video URL provided');
-    return res.status(400).json({ error: 'No video URL provided. Expected "videoUrl" or "url" field' });
+    return res.status(400).json({ error: 'No videoUrl provided' });
   }
 
-  console.log('Processing video from URL:', sourceUrl);
-
   const inputPath = `./uploads/input-${Date.now()}.mp4`;
-  const outputExt = outputFormat || format;
-  const outputPath = `./uploads/converted-${Date.now()}.${outputExt}`;
+  const outputPath = `./uploads/converted-${Date.now()}.${format}`;
 
   try {
-    // Scarica il video dall'URL
-    console.log('Downloading video...');
-    const https = require('https');
-    const http = require('http');
-    const client = sourceUrl.startsWith('https') ? https : http;
-    
-    const file = fs.createWriteStream(inputPath);
-    
-    await new Promise((resolve, reject) => {
-      client.get(sourceUrl, (response) => {
-        if (response.statusCode !== 200) {
-          reject(new Error(`Failed to download: ${response.statusCode}`));
-          return;
-        }
-        response.pipe(file);
-        file.on('finish', () => {
-          file.close();
-          console.log('Video downloaded successfully');
-          resolve();
-        });
-      }).on('error', (err) => {
-        fs.unlink(inputPath, () => {});
-        reject(err);
-      });
-    });
+    console.log('Downloading video from:', sourceUrl);
+    await downloadFromUrl(sourceUrl, inputPath);
+    console.log('Download completed');
 
     const qualityPresets = {
       low: { videoBitrate: '500k', audioBitrate: '64k' },
@@ -159,68 +164,66 @@ app.post('/video/convert-from-url', express.json(), async (req, res) => {
 
     const preset = qualityPresets[quality] || qualityPresets.medium;
 
-    console.log('Starting FFmpeg conversion...');
     let command = ffmpeg(inputPath)
       .videoBitrate(preset.videoBitrate)
       .audioBitrate(preset.audioBitrate)
-      .format(outputExt);
+      .format(format);
 
-    // Aggiungi trim se specificato
-    if (startTime !== undefined || duration !== undefined) {
-      if (startTime !== undefined) {
-        command = command.setStartTime(startTime);
-      }
-      if (duration !== undefined) {
-        command = command.setDuration(duration);
-      }
+    if (startTime !== undefined) {
+      command = command.setStartTime(startTime);
+    }
+    if (duration !== undefined) {
+      command = command.setDuration(duration);
     }
 
     command
       .on('end', () => {
-        console.log('Conversion completed');
-        // Leggi il file convertito
         const fileBuffer = fs.readFileSync(outputPath);
         const base64 = fileBuffer.toString('base64');
 
-        // Pulisci i file temporanei
         try {
           fs.unlinkSync(inputPath);
           fs.unlinkSync(outputPath);
-        } catch (e) {
-          console.error('Error deleting temp files:', e);
-        }
+        } catch {}
 
         res.json({
           success: true,
-          format: outputExt,
+          format,
           quality,
           data: base64,
-          contentType: `video/${outputExt}`
+          contentType: `video/${format}`
         });
       })
       .on('error', (err) => {
         console.error('FFmpeg error:', err);
-        // Pulisci i file in caso di errore
         try {
           if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
           if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-        } catch (e) {
-          console.error('Error deleting temp files:', e);
-        }
-        
-        res.status(500).json({ error: err.message });
+        } catch {}
+
+        res.status(500).json({
+          error: 'FFmpeg failed',
+          details: err.message
+        });
       })
       .save(outputPath);
+
   } catch (error) {
     console.error('Download or processing error:', error);
     try {
       if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
-    } catch (e) {}
-    res.status(500).json({ error: error.message });
+    } catch {}
+
+    res.status(500).json({
+      error: 'Download or processing failed',
+      details: error.message
+    });
   }
 });
 
-// Endpoint per convertire video - accetta sia 'video' che 'file'
+// =======================
+// Legacy endpoints (kept as-is)
+// =======================
 app.post('/video/convert', videoUpload, async (req, res) => {
   try {
     if (!req.file) {
@@ -243,11 +246,9 @@ app.post('/video/convert', videoUpload, async (req, res) => {
       .audioBitrate(preset.audioBitrate)
       .format(format)
       .on('end', () => {
-        // Leggi il file convertito
         const fileBuffer = fs.readFileSync(outputPath);
         const base64 = fileBuffer.toString('base64');
 
-        // Pulisci i file temporanei
         fs.unlinkSync(req.file.path);
         fs.unlinkSync(outputPath);
 
@@ -260,10 +261,9 @@ app.post('/video/convert', videoUpload, async (req, res) => {
         });
       })
       .on('error', (err) => {
-        // Pulisci i file in caso di errore
         if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
         if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-        
+
         res.status(500).json({ error: err.message });
       })
       .save(outputPath);
@@ -272,88 +272,7 @@ app.post('/video/convert', videoUpload, async (req, res) => {
   }
 });
 
-// Endpoint per estrarre thumbnail da video
-app.post('/video/thumbnail', videoUpload, async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No video file provided' });
-    }
-
-    const { timestamp = '00:00:01' } = req.body;
-    const outputPath = `./uploads/thumb-${Date.now()}.jpg`;
-
-    ffmpeg(req.file.path)
-      .screenshots({
-        timestamps: [timestamp],
-        filename: path.basename(outputPath),
-        folder: './uploads',
-        size: '640x?'
-      })
-      .on('end', () => {
-        const fileBuffer = fs.readFileSync(outputPath);
-        const base64 = fileBuffer.toString('base64');
-
-        // Pulisci i file temporanei
-        fs.unlinkSync(req.file.path);
-        fs.unlinkSync(outputPath);
-
-        res.json({
-          success: true,
-          data: base64,
-          contentType: 'image/jpeg'
-        });
-      })
-      .on('error', (err) => {
-        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-        
-        res.status(500).json({ error: err.message });
-      });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Endpoint per convertire audio
-app.post('/audio/convert', videoUpload, async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No audio file provided' });
-    }
-
-    const { format = 'mp3', bitrate = '128k' } = req.body;
-    const outputPath = `./uploads/converted-${Date.now()}.${format}`;
-
-    ffmpeg(req.file.path)
-      .audioBitrate(bitrate)
-      .format(format)
-      .on('end', () => {
-        const fileBuffer = fs.readFileSync(outputPath);
-        const base64 = fileBuffer.toString('base64');
-
-        fs.unlinkSync(req.file.path);
-        fs.unlinkSync(outputPath);
-
-        res.json({
-          success: true,
-          format,
-          bitrate,
-          data: base64,
-          contentType: `audio/${format}`
-        });
-      })
-      .on('error', (err) => {
-        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-        
-        res.status(500).json({ error: err.message });
-      })
-      .save(outputPath);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
+// =======================
 app.listen(PORT, () => {
   console.log(`FFmpeg microservice running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
