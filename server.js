@@ -106,6 +106,120 @@ app.post('/video/info', videoUpload, async (req, res) => {
   }
 });
 
+// Endpoint per convertire video DA URL
+app.post('/video/convert-from-url', express.json(), async (req, res) => {
+  console.log('Received convert-from-url request');
+  const { videoUrl, url, format = 'mp4', quality = 'medium', startTime, duration, outputFormat } = req.body;
+  
+  const sourceUrl = videoUrl || url;
+  
+  if (!sourceUrl) {
+    console.error('No video URL provided');
+    return res.status(400).json({ error: 'No video URL provided. Expected "videoUrl" or "url" field' });
+  }
+
+  console.log('Processing video from URL:', sourceUrl);
+
+  const inputPath = `./uploads/input-${Date.now()}.mp4`;
+  const outputExt = outputFormat || format;
+  const outputPath = `./uploads/converted-${Date.now()}.${outputExt}`;
+
+  try {
+    // Scarica il video dall'URL
+    console.log('Downloading video...');
+    const https = require('https');
+    const http = require('http');
+    const client = sourceUrl.startsWith('https') ? https : http;
+    
+    const file = fs.createWriteStream(inputPath);
+    
+    await new Promise((resolve, reject) => {
+      client.get(sourceUrl, (response) => {
+        if (response.statusCode !== 200) {
+          reject(new Error(`Failed to download: ${response.statusCode}`));
+          return;
+        }
+        response.pipe(file);
+        file.on('finish', () => {
+          file.close();
+          console.log('Video downloaded successfully');
+          resolve();
+        });
+      }).on('error', (err) => {
+        fs.unlink(inputPath, () => {});
+        reject(err);
+      });
+    });
+
+    const qualityPresets = {
+      low: { videoBitrate: '500k', audioBitrate: '64k' },
+      medium: { videoBitrate: '1000k', audioBitrate: '128k' },
+      high: { videoBitrate: '2500k', audioBitrate: '192k' }
+    };
+
+    const preset = qualityPresets[quality] || qualityPresets.medium;
+
+    console.log('Starting FFmpeg conversion...');
+    let command = ffmpeg(inputPath)
+      .videoBitrate(preset.videoBitrate)
+      .audioBitrate(preset.audioBitrate)
+      .format(outputExt);
+
+    // Aggiungi trim se specificato
+    if (startTime !== undefined || duration !== undefined) {
+      if (startTime !== undefined) {
+        command = command.setStartTime(startTime);
+      }
+      if (duration !== undefined) {
+        command = command.setDuration(duration);
+      }
+    }
+
+    command
+      .on('end', () => {
+        console.log('Conversion completed');
+        // Leggi il file convertito
+        const fileBuffer = fs.readFileSync(outputPath);
+        const base64 = fileBuffer.toString('base64');
+
+        // Pulisci i file temporanei
+        try {
+          fs.unlinkSync(inputPath);
+          fs.unlinkSync(outputPath);
+        } catch (e) {
+          console.error('Error deleting temp files:', e);
+        }
+
+        res.json({
+          success: true,
+          format: outputExt,
+          quality,
+          data: base64,
+          contentType: `video/${outputExt}`
+        });
+      })
+      .on('error', (err) => {
+        console.error('FFmpeg error:', err);
+        // Pulisci i file in caso di errore
+        try {
+          if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+          if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+        } catch (e) {
+          console.error('Error deleting temp files:', e);
+        }
+        
+        res.status(500).json({ error: err.message });
+      })
+      .save(outputPath);
+  } catch (error) {
+    console.error('Download or processing error:', error);
+    try {
+      if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+    } catch (e) {}
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Endpoint per convertire video - accetta sia 'video' che 'file'
 app.post('/video/convert', videoUpload, async (req, res) => {
   try {
