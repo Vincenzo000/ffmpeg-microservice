@@ -8,9 +8,14 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+// Middleware con configurazione CORS specifica
+app.use(cors({
+  origin: '*', // Permetti tutte le origini (puoi limitare a lovable.dev in produzione)
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Configurazione storage per upload
 const storage = multer.diskStorage({
@@ -26,7 +31,12 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage });
+const upload = multer({ 
+  storage,
+  limits: {
+    fileSize: 100 * 1024 * 1024 // 100MB max
+  }
+});
 
 // Endpoint per verificare lo stato del servizio
 app.get('/health', (req, res) => {
@@ -39,19 +49,29 @@ app.get('/health', (req, res) => {
 
 // Endpoint per ottenere informazioni su un video
 app.post('/video/info', upload.single('video'), async (req, res) => {
+  console.log('Received video info request');
   try {
     if (!req.file) {
+      console.error('No video file provided');
       return res.status(400).json({ error: 'No video file provided' });
     }
 
+    console.log('Processing file:', req.file.originalname);
+    
     ffmpeg.ffprobe(req.file.path, (err, metadata) => {
       // Pulisci il file temporaneo
-      fs.unlinkSync(req.file.path);
+      try {
+        fs.unlinkSync(req.file.path);
+      } catch (e) {
+        console.error('Error deleting temp file:', e);
+      }
 
       if (err) {
+        console.error('FFprobe error:', err);
         return res.status(500).json({ error: err.message });
       }
 
+      console.log('Video info retrieved successfully');
       res.json({
         duration: metadata.format.duration,
         size: metadata.format.size,
@@ -66,6 +86,7 @@ app.post('/video/info', upload.single('video'), async (req, res) => {
       });
     });
   } catch (error) {
+    console.error('Unexpected error:', error);
     res.status(500).json({ error: error.message });
   }
 });
