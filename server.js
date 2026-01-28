@@ -38,6 +38,21 @@ const upload = multer({
   }
 });
 
+// Helper middleware per accettare sia 'video' che 'file' come nome campo
+const videoUpload = (req, res, next) => {
+  const uploader = upload.any();
+  uploader(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({ error: err.message });
+    }
+    // Trova il primo file caricato
+    if (req.files && req.files.length > 0) {
+      req.file = req.files[0];
+    }
+    next();
+  });
+};
+
 // Endpoint per verificare lo stato del servizio
 app.get('/health', (req, res) => {
   res.json({ 
@@ -48,7 +63,7 @@ app.get('/health', (req, res) => {
 });
 
 // Endpoint per ottenere informazioni su un video
-app.post('/video/info', upload.single('video'), async (req, res) => {
+app.post('/video/info', videoUpload, async (req, res) => {
   console.log('Received video info request');
   try {
     if (!req.file) {
@@ -91,8 +106,8 @@ app.post('/video/info', upload.single('video'), async (req, res) => {
   }
 });
 
-// Endpoint per convertire video
-app.post('/video/convert', upload.single('video'), async (req, res) => {
+// Endpoint per convertire video - accetta sia 'video' che 'file'
+app.post('/video/convert', videoUpload, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No video file provided' });
@@ -144,7 +159,7 @@ app.post('/video/convert', upload.single('video'), async (req, res) => {
 });
 
 // Endpoint per estrarre thumbnail da video
-app.post('/video/thumbnail', upload.single('video'), async (req, res) => {
+app.post('/video/thumbnail', videoUpload, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No video file provided' });
@@ -186,7 +201,7 @@ app.post('/video/thumbnail', upload.single('video'), async (req, res) => {
 });
 
 // Endpoint per convertire audio
-app.post('/audio/convert', upload.single('audio'), async (req, res) => {
+app.post('/audio/convert', videoUpload, async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No audio file provided' });
